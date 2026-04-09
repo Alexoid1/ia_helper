@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-
 """
 Hotkey Notifier - Compatible con Wayland
-Al presionar Ctrl+X:
+Al presionar 1+X:
   1. Toma una captura con gnome-screenshot
   2. La guarda en /capturas/
   3. Envia la imagen a GPT-4o Vision
@@ -29,13 +28,12 @@ from evdev import ecodes
 TITULO           = "GPT-4o Responde"
 CARPETA_CAPTURAS = "/home/pablo/Escritorio/coding-challenges/easy-test/capturas"
 USUARIO          = "pablo"
-OPENAI_API_KEY   = "open-ai-key"
+OPENAI_API_KEY   = "REMOVED"
 OPENAI_API_URL   = "https://api.openai.com/v1/chat/completions"
 
-# Codigos de teclas que se escuchan
-KEY_X      = ecodes.KEY_X
-KEY_CTRL_L = ecodes.KEY_LEFTCTRL
-KEY_CTRL_R = ecodes.KEY_RIGHTCTRL
+# Codigos de teclas que se escuchan (1+X)
+KEY_X   = ecodes.KEY_X
+KEY_1   = ecodes.KEY_1
 
 
 def obtener_uid_dbus():
@@ -126,11 +124,13 @@ def preguntar_a_gpt4o(ruta_imagen):
                     {
                         "type": "text",
                         "text": (
-                            "Lee todo el texto y codigo visible en esta captura de pantalla. "
-                            "Si hay un ejercicio o pregunta de programacion, RESUELVELO directamente: escribe el codigo completo y correcto como respuesta. "
-                            "Si hay una pregunta conceptual, responde de forma directa y concisa en español. "
-                            "NO describas ni reformules lo que ves. Ve directo a la solucion. "
-                            "Si la respuesta es codigo, escribe solo el codigo necesario con una breve explicacion."
+                            "Read all visible text and code in this screenshot. "
+                            "IMPORTANT: Detect the language of the question or exercise and respond in that same language. "
+                            "If the content is in Spanish, respond in Spanish. If it is in English, respond in English. "
+                            "If there is a coding exercise, solve it directly: write the complete and correct code. "
+                            "If there is a conceptual question, answer it directly and concisely. "
+                            "Do NOT describe or restate what you see. Go straight to the solution. "
+                            "If the answer is code, write only the necessary code with a brief explanation."
                         )
                     }
                 ]
@@ -196,6 +196,7 @@ def mostrar_ventana_alerta(nombre_archivo, respuesta):
             "--fontname=Monospace 11",  # fuente monospace para codigo
             "--width=620",
             "--height=400",
+            "--geometry=620x400+300+250",  # posicion: X=900, Y=250
             "--button=Cerrar:0",
             "--wrap",            # ajuste de linea automatico
         ], stdin=echo_proc.stdout)
@@ -207,7 +208,7 @@ def mostrar_ventana_alerta(nombre_archivo, respuesta):
 
 def manejar_evento():
     """
-    Orquesta el flujo completo que se ejecuta cada vez que se presiona Ctrl+X:
+    Orquesta el flujo completo que se ejecuta cada vez que se presiona 1+X:
       1. Llama a tomar_captura() para obtener la imagen.
       2. Llama a preguntar_a_gpt4o() para analizar la imagen.
       3. Llama a mostrar_ventana_alerta() para mostrar la respuesta.
@@ -255,7 +256,7 @@ def main():
     Punto de entrada del script. Realiza las validaciones iniciales
     (teclado disponible, carpeta de capturas existente) y luego inicia
     el bucle principal de escucha de eventos del teclado.
-    Detecta cuando se presionan Ctrl+X simultaneamente y lanza
+    Detecta cuando se presionan 1+X simultaneamente y lanza
     manejar_evento() en un hilo separado para no bloquear el bucle.
     """
     # Buscar teclado disponible
@@ -274,11 +275,11 @@ def main():
     print(f"  Capturas: {CARPETA_CAPTURAS}")
     print(f"  Usuario : {USUARIO}")
     print(f"  IA      : GPT-4o Vision")
-    print("  Flujo   : Ctrl+X -> captura -> GPT-4o -> alerta")
+    print("  Flujo   : 1+X -> captura -> GPT-4o -> alerta")
     print("  Salir   : Ctrl+C")
     print("=" * 60)
 
-    ctrl_activo = False  # rastrea si Ctrl esta presionado
+    uno_activo = False  # rastrea si la tecla 1 esta presionada
 
     try:
         # Bucle principal: leer eventos del teclado indefinidamente
@@ -289,14 +290,14 @@ def main():
 
             key_event = evdev.categorize(evento)
 
-            # Actualizar estado de Ctrl (presionado o soltado)
-            if key_event.scancode in (KEY_CTRL_L, KEY_CTRL_R):
-                ctrl_activo = (key_event.keystate != 0)  # 0=soltado, 1=presionado
+            # Actualizar estado de la tecla 1 (presionada o soltada)
+            if key_event.scancode == KEY_1:
+                uno_activo = (key_event.keystate != 0)  # 0=soltado, 1=presionado, 2=repetido
 
-            # Detectar Ctrl+X: X presionada (keystate==1) mientras Ctrl esta activo
+            # Detectar 1+X: X presionada (keystate==1) mientras 1 esta activa
             if (key_event.scancode == KEY_X
                     and key_event.keystate == 1
-                    and ctrl_activo):
+                    and uno_activo):
                 # Lanzar en hilo separado para no bloquear la escucha
                 threading.Thread(target=manejar_evento, daemon=True).start()
 
