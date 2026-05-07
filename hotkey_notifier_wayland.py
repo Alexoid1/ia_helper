@@ -131,6 +131,7 @@ def preguntar_a_gpt4o(ruta_imagen):
                             "If there is a conceptual question, answer it directly and concisely. "
                             "Do NOT describe or restate what you see. Go straight to the solution. "
                             "If the answer is code, write only the necessary code with a brief explanation."
+                            
                         )
                     }
                 ]

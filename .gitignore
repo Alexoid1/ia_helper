@@ -1,1 +1,16 @@
-*.png
+# Variables de entorno - nunca subir al repo
+.env
+
+# Capturas de pantalla
+capturas/
+
+# Transcripciones de audio
+transcripciones/
+
+# Archivos de audio temporales
+*.wav
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
