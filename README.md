@@ -1,4 +1,4 @@
-# 🖥️ Hotkey Notifier con GPT-4o Vision
+# 🖥️ Hotkey Notifier 
 
 Script para Ubuntu con Wayland que al presionar **Ctrl+X**:
 1. Toma una captura de pantalla
