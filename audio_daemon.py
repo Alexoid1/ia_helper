@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
 Audio Daemon - Script independiente para grabacion y transcripcion.
-Hotkeys propios (no depende de hotkey_notifier_wayland.py):
+Hotkeys:
   A+1  ->  inicia grabacion del audio del sistema
   S+1  ->  detiene grabacion, transcribe con Whisper y guarda .txt
+  G+1  ->  abre selector de archivos, extrae audio del video y transcribe en ingles
 
 Uso:
-    sudo python3 audio_daemon.py
+    XDG_RUNTIME_DIR=/run/user/1001 PULSE_SERVER=unix:/run/user/1001/pulse/native python3 audio_daemon.py
 """
 
 import os
@@ -32,6 +33,7 @@ WHISPER_API_URL = "https://api.openai.com/v1/audio/transcriptions"
 # Teclas
 KEY_A = ecodes.KEY_A
 KEY_S = ecodes.KEY_S
+KEY_G = ecodes.KEY_G
 KEY_1 = ecodes.KEY_1
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -66,7 +68,7 @@ def obtener_uid_dbus():
 def iniciar_grabacion():
     """
     Inicia parecord capturando el monitor del sink principal.
-    Corre parecord como pablo con su entorno completo de PipeWire.
+    Corre parecord con el entorno completo de PipeWire.
     """
     global _proceso_grabacion, _archivo_audio_actual
 
@@ -83,21 +85,16 @@ def iniciar_grabacion():
         )
 
         uid, dbus = obtener_uid_dbus()
+        env_audio = os.environ.copy()
+        env_audio["XDG_RUNTIME_DIR"]          = f"/run/user/{uid}"
+        env_audio["PULSE_SERVER"]             = f"unix:/run/user/{uid}/pulse/native"
+        env_audio["PULSE_RUNTIME_PATH"]       = f"/run/user/{uid}/pulse"
+        env_audio["DBUS_SESSION_BUS_ADDRESS"] = dbus
 
-        env = {
-            "HOME":                     f"/home/{USUARIO}",
-            "USER":                     USUARIO,
-            "XDG_RUNTIME_DIR":          f"/run/user/{uid}",
-            "PULSE_SERVER":             f"unix:/run/user/{uid}/pulse/native",
-            "DBUS_SESSION_BUS_ADDRESS": dbus,
-            "PATH":                     "/usr/bin:/bin:/usr/local/bin",
-        }
+        print(f"[Mic] Grabando audio del sistema...")
+        print(f"      Archivo: {_archivo_audio_actual}")
+        print(f"      Presiona S+1 para detener y transcribir.")
 
-        print(f"[🎙] Grabando audio del sistema...")
-        print(f"     Archivo: {_archivo_audio_actual}")
-        print(f"     Presiona S+1 para detener y transcribir.")
-
-        # Correr parecord directamente sin sudo
         _proceso_grabacion = subprocess.Popen(
             [
                 "parecord",
@@ -105,8 +102,9 @@ def iniciar_grabacion():
                 "--file-format=wav",
                 _archivo_audio_actual,
             ],
+            env=env_audio,
             stdout=subprocess.DEVNULL,
-            stderr=None,  # mostrar errores en terminal
+            stderr=None,
         )
 
 
@@ -139,30 +137,112 @@ def detener_y_transcribir():
         os.remove(archivo_audio)
         return
 
-    threading.Thread(target=_transcribir_audio, args=(archivo_audio,), daemon=True).start()
+    threading.Thread(target=_transcribir_audio, args=(archivo_audio, None), daemon=True).start()
 
 
-def _transcribir_audio(archivo_audio):
-    """Envia el .wav a Whisper y guarda la transcripcion en .txt."""
+def seleccionar_video_y_transcribir():
+    """
+    Abre un selector de archivos con zenity para elegir un video.
+    Extrae el audio con ffmpeg y lo envia a Whisper forzando ingles.
+    Guarda la transcripcion en transcripciones/.
+    """
+    uid, dbus = obtener_uid_dbus()
+
+    print("[G+1] Abriendo selector de archivos...")
+
+    # Abrir zenity para seleccionar video
+    resultado = subprocess.run([
+        "sudo", "-u", USUARIO,
+        "env",
+        "DISPLAY=:0",
+        f"DBUS_SESSION_BUS_ADDRESS={dbus}",
+        f"XDG_RUNTIME_DIR=/run/user/{uid}",
+        "zenity",
+        "--file-selection",
+        "--title=Selecciona un video para transcribir",
+        "--file-filter=Videos | *.mp4 *.mkv *.avi *.mov *.webm *.flv *.m4v",
+    ], capture_output=True, text=True)
+
+    ruta_video = resultado.stdout.strip()
+
+    if not ruta_video or not os.path.exists(ruta_video):
+        print("[!] No se selecciono ningun archivo o no existe.")
+        return
+
+    print(f"[OK] Video seleccionado: {ruta_video}")
+
+    # Extraer audio del video con ffmpeg
+    timestamp  = datetime.now().strftime("%Y%m%d_%H%M%S")
+    audio_tmp  = os.path.join(CARPETA_TRANSCRIPCIONES, f"video_audio_{timestamp}.mp3")
+
+    print(f"[ffmpeg] Extrayendo audio del video...")
+    resultado_ffmpeg = subprocess.run([
+        "ffmpeg",
+        "-i", ruta_video,       # archivo de entrada
+        "-vn",                  # sin video
+        "-acodec", "libmp3lame", # codec mp3
+        "-ar", "16000",         # frecuencia 16khz (optima para Whisper)
+        "-ac", "1",             # mono
+        "-q:a", "2",            # calidad alta
+        "-y",                   # sobreescribir si existe
+        audio_tmp,
+    ], capture_output=True, text=True)
+
+    if resultado_ffmpeg.returncode != 0:
+        print(f"[X] Error ffmpeg: {resultado_ffmpeg.stderr}")
+        return
+
+    if not os.path.exists(audio_tmp):
+        print("[X] ffmpeg no creo el archivo de audio.")
+        return
+
+    tamanio = os.path.getsize(audio_tmp)
+    print(f"[OK] Audio extraido: {audio_tmp} ({tamanio} bytes)")
+
+    # Transcribir forzando ingles
+    _transcribir_audio(audio_tmp, idioma="en")
+
+
+def _transcribir_audio(archivo_audio, idioma=None):
+    """
+    Envia el archivo de audio a Whisper y guarda la transcripcion en .txt.
+    Parametros:
+      - archivo_audio: ruta al archivo .wav o .mp3
+      - idioma: codigo de idioma para forzar (ej: 'en' para ingles, None para auto)
+    """
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         print("[X] OPENAI_API_KEY no encontrada en .env")
         return
 
-    print("[Whisper] Transcribiendo...")
+    print(f"[Whisper] Transcribiendo{' en ingles' if idioma == 'en' else ''}...")
 
     try:
         with open(archivo_audio, "rb") as f:
             audio_data = f.read()
 
+        # Detectar tipo de archivo
+        ext = os.path.splitext(archivo_audio)[1].lower()
+        mime = "audio/mpeg" if ext == ".mp3" else "audio/wav"
+
         boundary = "----FormBoundary7MA4YWxkTrZu0gW"
         body  = b""
+
+        # campo model
         body += f"--{boundary}\r\n".encode()
         body += b'Content-Disposition: form-data; name="model"\r\n\r\n'
         body += b"whisper-1\r\n"
+
+        # campo language (forzar idioma si se especifica)
+        if idioma:
+            body += f"--{boundary}\r\n".encode()
+            body += b'Content-Disposition: form-data; name="language"\r\n\r\n'
+            body += f"{idioma}\r\n".encode()
+
+        # campo file
         body += f"--{boundary}\r\n".encode()
         body += f'Content-Disposition: form-data; name="file"; filename="{os.path.basename(archivo_audio)}"\r\n'.encode()
-        body += b"Content-Type: audio/wav\r\n\r\n"
+        body += f"Content-Type: {mime}\r\n\r\n".encode()
         body += audio_data
         body += b"\r\n"
         body += f"--{boundary}--\r\n".encode()
@@ -177,7 +257,7 @@ def _transcribir_audio(archivo_audio):
             method="POST"
         )
 
-        with urllib.request.urlopen(req, timeout=60) as response:
+        with urllib.request.urlopen(req, timeout=120) as response:
             data          = json.loads(response.read().decode("utf-8"))
             transcripcion = data.get("text", "").strip()
 
@@ -185,13 +265,15 @@ def _transcribir_audio(archivo_audio):
             print("[!] Transcripcion vacia.")
             return
 
-        nombre_txt = archivo_audio.replace(".wav", ".txt")
+        # Guardar .txt con mismo nombre base
+        nombre_txt = os.path.splitext(archivo_audio)[0] + ".txt"
         with open(nombre_txt, "w", encoding="utf-8") as f:
             f.write(transcripcion)
 
         print(f"[OK] Transcripcion guardada: {nombre_txt}")
         print(f"     Preview: {transcripcion[:200]}")
 
+        # Eliminar audio temporal
         os.remove(archivo_audio)
         print("[OK] Audio temporal eliminado.")
 
@@ -202,7 +284,7 @@ def _transcribir_audio(archivo_audio):
 
 
 def encontrar_teclado():
-    """Usa el mismo teclado identificado: /dev/input/event2."""
+    """Usa el teclado identificado: /dev/input/event2."""
     try:
         dev = evdev.InputDevice("/dev/input/event2")
         print(f"[OK] Teclado: {dev.name} ({dev.path})")
@@ -215,8 +297,7 @@ def encontrar_teclado():
 def main():
     """
     Bucle principal independiente.
-    Detecta A+1 para grabar y S+1 para detener y transcribir.
-    Completamente independiente de hotkey_notifier_wayland.py.
+    Detecta A+1, S+1 y G+1.
     """
     cargar_env()
 
@@ -227,15 +308,17 @@ def main():
     os.makedirs(CARPETA_TRANSCRIPCIONES, exist_ok=True)
 
     print("=" * 55)
-    print(f"  Teclado      : {dev.name}")
+    print(f"  Teclado        : {dev.name}")
     print(f"  Transcripciones: {CARPETA_TRANSCRIPCIONES}")
-    print(f"  A+1  ->  iniciar grabacion")
+    print(f"  A+1  ->  iniciar grabacion de audio")
     print(f"  S+1  ->  detener y transcribir")
+    print(f"  G+1  ->  seleccionar video y transcribir en ingles")
     print(f"  Salir: Ctrl+C")
     print("=" * 55)
 
     a_activo = False
     s_activo = False
+    g_activo = False
 
     try:
         for evento in dev.read_loop():
@@ -246,30 +329,28 @@ def main():
 
             if key_event.scancode == KEY_A:
                 a_activo = (key_event.keystate != 0)
-
             if key_event.scancode == KEY_S:
                 s_activo = (key_event.keystate != 0)
+            if key_event.scancode == KEY_G:
+                g_activo = (key_event.keystate != 0)
 
-            # A+1 -> iniciar grabacion
-            if (key_event.scancode == KEY_1
-                    and key_event.keystate == 1
-                    and a_activo):
-                print("[Hotkey] A+1 -> iniciar grabacion")
-                threading.Thread(target=iniciar_grabacion, daemon=True).start()
-
-            # S+1 -> detener y transcribir
-            if (key_event.scancode == KEY_1
-                    and key_event.keystate == 1
-                    and s_activo):
-                print("[Hotkey] S+1 -> detener y transcribir")
-                threading.Thread(target=detener_y_transcribir, daemon=True).start()
+            if key_event.scancode == KEY_1 and key_event.keystate == 1:
+                if a_activo:
+                    print("[Hotkey] A+1 -> iniciar grabacion")
+                    threading.Thread(target=iniciar_grabacion, daemon=True).start()
+                elif s_activo:
+                    print("[Hotkey] S+1 -> detener y transcribir")
+                    threading.Thread(target=detener_y_transcribir, daemon=True).start()
+                elif g_activo:
+                    print("[Hotkey] G+1 -> seleccionar video y transcribir")
+                    threading.Thread(target=seleccionar_video_y_transcribir, daemon=True).start()
 
     except KeyboardInterrupt:
         if _proceso_grabacion:
             _proceso_grabacion.terminate()
         print("\n[!] Audio Daemon detenido.")
     except PermissionError:
-        print("\n[X] Ejecuta con: sudo python3 audio_daemon.py")
+        print("\n[X] Ejecuta con los permisos correctos.")
 
 
 if __name__ == "__main__":
